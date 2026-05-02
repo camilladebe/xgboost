@@ -4,6 +4,9 @@
 #ifndef XGBOOST_TREE_HIST_HISTOGRAM_H_
 #define XGBOOST_TREE_HIST_HISTOGRAM_H_
 
+#include <chrono>
+#include <iostream>
+
 #include <algorithm>   // for max
 #include <cstddef>     // for size_t
 #include <cstdint>     // for int32_t
@@ -165,6 +168,8 @@ class HistogramBuilder {
       buffer_.Reset(this->n_threads_, n_nodes, space, target_hists);
     }
 
+   // === TIMING START ===
+   auto build_start = std::chrono::steady_clock::now();
     if (gidx.IsDense()) {
       this->BuildLocalHistograms<false>(space, gidx, nodes_to_build, row_set_collection,
                                         gpair.Values(), read_by_column);
@@ -172,6 +177,14 @@ class HistogramBuilder {
       this->BuildLocalHistograms<true>(space, gidx, nodes_to_build, row_set_collection,
                                        gpair.Values(), read_by_column);
     }
+
+    auto build_end = std::chrono::steady_clock::now();
+    auto build_time = std::chrono::duration<double, std::ratio<1>>(build_end - build_start).count();
+    std::cout << "[BuildHist page=" << page_idx << "] Client compute time: "
+            << build_time << " s\n";
+    // auto us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
+    // === TIMING END ===
+
     monitor_.Stop(__func__);
   }
 
@@ -191,12 +204,21 @@ class HistogramBuilder {
       CHECK(!nodes_to_build.empty());
       auto first_nidx = nodes_to_build.front();
       std::size_t n = n_total_bins * nodes_to_build.size() * 2;
+
+      auto comm_start = std::chrono::steady_clock::now();
       auto rc = collective::Allreduce(
           ctx, linalg::MakeVec(reinterpret_cast<double *>(this->hist_[first_nidx].data()), n),
           collective::Op::kSum);
-      SafeColl(rc);
-    }
+      auto comm_end = std::chrono::steady_clock::now();
+      auto communication_time = std::chrono::duration<double>(comm_end - comm_start).count();
 
+     std::cout << "[AllReduce nodes=" << nodes_to_build.size()
+          << " bins=" << n_total_bins
+          << "] Communication time: "
+          << communication_time << " s\n";
+
+      SafeColl(rc);
+    
     common::BlockedSpace2d const &subspace =
         nodes_to_trick.size() == nodes_to_build.size()
             ? space
