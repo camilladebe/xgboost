@@ -168,8 +168,8 @@ class HistogramBuilder {
       buffer_.Reset(this->n_threads_, n_nodes, space, target_hists);
     }
 
-   // === TIMING START ===
-   auto build_start = std::chrono::steady_clock::now();
+    // === TIMING START ===
+    auto build_start = std::chrono::steady_clock::now();
     if (gidx.IsDense()) {
       this->BuildLocalHistograms<false>(space, gidx, nodes_to_build, row_set_collection,
                                         gpair.Values(), read_by_column);
@@ -184,7 +184,6 @@ class HistogramBuilder {
             << build_time << " s\n";
     // auto us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
     // === TIMING END ===
-
     monitor_.Stop(__func__);
   }
 
@@ -205,6 +204,7 @@ class HistogramBuilder {
       auto first_nidx = nodes_to_build.front();
       std::size_t n = n_total_bins * nodes_to_build.size() * 2;
 
+      // === TIMING START ===
       auto comm_start = std::chrono::steady_clock::now();
       auto rc = collective::Allreduce(
           ctx, linalg::MakeVec(reinterpret_cast<double *>(this->hist_[first_nidx].data()), n),
@@ -216,9 +216,11 @@ class HistogramBuilder {
           << " bins=" << n_total_bins
           << "] Communication time: "
           << communication_time << " s\n";
-
+      // === TIMING END ===
+      
       SafeColl(rc);
-    
+    }
+
     common::BlockedSpace2d const &subspace =
         nodes_to_trick.size() == nodes_to_build.size()
             ? space
