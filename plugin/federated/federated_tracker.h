@@ -18,12 +18,13 @@
 #include "xgboost/json.h"                  // for Json
 
 namespace xgboost::collective {
-namespace federated {
 class FederatedTracker;
+
+namespace federated {
 
 class FederatedService final : public Federated::Service {
  public:
-  explicit FederatedService(std::int32_t world_size, FederatedTracker* tracker)
+  explicit FederatedService(std::int32_t world_size, xgboost::collective::FederatedTracker* tracker)
       : handler_{world_size}, tracker_{tracker} {}
 
   grpc::Status Allgather(grpc::ServerContext* context, AllgatherRequest const* request,
@@ -43,7 +44,7 @@ class FederatedService final : public Federated::Service {
 
  private:
   xgboost::collective::InMemoryHandler handler_;
-  FederatedTracker* tracker_{nullptr};
+  xgboost::collective::FederatedTracker* tracker_{nullptr};
 };
 };  // namespace federated
 

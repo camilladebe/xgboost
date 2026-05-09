@@ -6,6 +6,8 @@
 #include "xgboost/collective/result.h"  // for Result
 #include "xgboost/span.h"               // for Span
 
+#include <vector>
+
 namespace xgboost::collective {
 class CUDAFederatedColl : public Coll {
   std::shared_ptr<FederatedColl> p_impl_;

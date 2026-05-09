@@ -85,8 +85,12 @@ FederatedTracker::FederatedTracker(Json const& config) : Tracker{config} {
     CHECK(!client_cert_file_.empty()) << msg;
   }
 
-  timing_enabled_ = OptionalArg<Boolean>(config, "federated_timing.enabled", Boolean{false});
-  timing_path_ = OptionalArg<String>(config, "federated_timing.path", std::string{});
+  bool const default_timing_enabled = false;
+  std::string const default_timing_path;
+  timing_enabled_ =
+      OptionalArg<Boolean, bool>(config, "federated_timing.enabled", default_timing_enabled);
+  timing_path_ =
+      OptionalArg<String, std::string>(config, "federated_timing.path", default_timing_path);
 }
 
 std::future<Result> FederatedTracker::Run() {
