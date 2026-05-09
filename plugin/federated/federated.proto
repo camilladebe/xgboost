@@ -82,9 +82,10 @@ message TimingRow {
   uint64 iteration = 1;
   uint64 tree_id = 2;
   int64 tree_node_id = 3;
-  double compute_time_s = 4;
-  double server_time_s = 5;
-  double communication_time_s = 6;
+  int32 rank = 4;
+  double compute_time_s = 5;
+  double server_time_s = 6;
+  double communication_time_s = 7;
 }
 
 message ReportTimingRequest {

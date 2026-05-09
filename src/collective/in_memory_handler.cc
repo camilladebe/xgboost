@@ -4,8 +4,8 @@
 #include "in_memory_handler.h"
 
 #include <algorithm>
-#include <functional>
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include "comm.h"
 
@@ -69,10 +69,8 @@ class AllreduceFunctor {
  public:
   std::string const name{"Allreduce"};
 
-  AllreduceFunctor(ArrayInterfaceHandler::Type dataType, Op operation,
-                  double *aggregation_time_s, std::mutex *aggregation_mutex)
-      : data_type_{dataType}, operation_{operation}, aggregation_time_s_{aggregation_time_s},
-        aggregation_mutex_{aggregation_mutex} {}
+  AllreduceFunctor(ArrayInterfaceHandler::Type dataType, Op operation, double* aggregation_time_s)
+      : data_type_{dataType}, operation_{operation}, aggregation_time_s_{aggregation_time_s} {}
 
   void operator()(char const* input, std::size_t bytes, std::string* buffer) const {
     if (buffer->empty()) {
@@ -85,8 +83,7 @@ class AllreduceFunctor {
       Accumulate(input, bytes / n_bytes_type, &buffer->front());
       auto end = std::chrono::steady_clock::now();
       std::chrono::duration<double> dur = end - start;
-      if (aggregation_time_s_ && aggregation_mutex_) {
-        std::lock_guard<std::mutex> lg(*aggregation_mutex_);
+      if (aggregation_time_s_) {
         *aggregation_time_s_ += dur.count();
       }
     }
@@ -182,8 +179,7 @@ class AllreduceFunctor {
  private:
   ArrayInterfaceHandler::Type data_type_;
   Op operation_;
-  double *aggregation_time_s_{};
-  std::mutex *aggregation_mutex_{};
+  double* aggregation_time_s_{};
 };
 
 /**
@@ -247,6 +243,7 @@ void InMemoryHandler::Allreduce(char const* input, std::size_t bytes, std::strin
                                 ArrayInterfaceHandler::Type data_type, Op op,
                                 double client_total_time_s, double* out_client_time_max_s,
                                 double* out_server_aggregation_time_s) {
+  double* aggregation_time = nullptr;
   // Update max client time for this sequence.
   {
     std::lock_guard<std::mutex> lg(mutex_);
@@ -256,20 +253,34 @@ void InMemoryHandler::Allreduce(char const* input, std::size_t bytes, std::strin
     } else {
       it->second = std::max(it->second, client_total_time_s);
     }
+    server_aggregation_time_.try_emplace(sequence_number, 0.0);
+    allreduce_replies_.try_emplace(sequence_number, 0);
+    aggregation_time = &server_aggregation_time_.at(sequence_number);
   }
 
-  double aggregation_time_s = 0.0;
-  std::mutex aggregation_mutex;
   Handle(input, bytes, output, sequence_number, rank,
-         AllreduceFunctor{data_type, op, &aggregation_time_s, &aggregation_mutex});
+         AllreduceFunctor{data_type, op, aggregation_time});
 
   double client_max = 0.0;
+  double aggregation_time_s = 0.0;
   {
     std::lock_guard<std::mutex> lg(mutex_);
     auto it = client_time_max_.find(sequence_number);
     if (it != client_time_max_.end()) {
       client_max = it->second;
-      client_time_max_.erase(it);
+    }
+    auto server_it = server_aggregation_time_.find(sequence_number);
+    if (server_it != server_aggregation_time_.end()) {
+      aggregation_time_s = server_it->second;
+    }
+    auto replies_it = allreduce_replies_.find(sequence_number);
+    if (replies_it != allreduce_replies_.end()) {
+      replies_it->second++;
+      if (replies_it->second == world_size_) {
+        allreduce_replies_.erase(replies_it);
+        server_aggregation_time_.erase(sequence_number);
+        client_time_max_.erase(sequence_number);
+      }
     }
   }
 

@@ -124,6 +124,8 @@ class InMemoryHandler {
   std::string buffer_{};      /// A shared common buffer.
   std::map<std::size_t, std::string_view> aux_{};  /// A shared auxiliary map.
   std::map<uint64_t, double> client_time_max_{};  /// Temporary max client times per sequence.
+  std::map<uint64_t, double> server_aggregation_time_{};  /// Aggregation time per sequence.
+  std::map<uint64_t, std::int32_t> allreduce_replies_{};  /// Replies sent per allreduce sequence.
   uint64_t sequence_number_{};                     /// Call sequence number.
   mutable std::mutex mutex_;                       /// Lock.
   mutable std::condition_variable cv_;             /// Conditional variable to wait on.

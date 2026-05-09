@@ -16,7 +16,8 @@ import xgboost.federated
 
 class XGBoostController(Controller):
     def __init__(self, port: int, world_size: int, server_key_path: str,
-                 server_cert_path: str, client_cert_path: str):
+                 server_cert_path: str, client_cert_path: str,
+                 timing_enabled: bool = False, timing_path: str = "federated_timing.csv"):
         """Controller for federated XGBoost.
 
         Args:
@@ -25,6 +26,8 @@ class XGBoostController(Controller):
             server_key_path: the path to the server key file.
             server_cert_path: the path to the server certificate file.
             client_cert_path: the path to the client certificate file.
+            timing_enabled: whether to write histogram timing rows to CSV.
+            timing_path: output CSV path on the federated server.
         """
         super().__init__()
         self._port = port
@@ -32,13 +35,21 @@ class XGBoostController(Controller):
         self._server_key_path = server_key_path
         self._server_cert_path = server_cert_path
         self._client_cert_path = client_cert_path
+        self._timing_enabled = timing_enabled
+        self._timing_path = timing_path
         self._server = None
 
     def start_controller(self, fl_ctx: FLContext):
         self._server = multiprocessing.Process(
             target=xgboost.federated.run_federated_server,
-            args=(self._port, self._world_size, self._server_key_path,
-                  self._server_cert_path, self._client_cert_path))
+            args=(self._world_size, self._port),
+            kwargs={
+                "server_key_path": self._server_key_path,
+                "server_cert_path": self._server_cert_path,
+                "client_cert_path": self._client_cert_path,
+                "timing_enabled": self._timing_enabled,
+                "timing_path": self._timing_path,
+            })
         self._server.start()
 
     def stop_controller(self, fl_ctx: FLContext):

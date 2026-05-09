@@ -16,6 +16,7 @@ struct TimingRecord {
   std::uint64_t iteration{};
   std::uint64_t tree_id{};
   std::int64_t tree_node_id{};
+  std::int32_t rank{};
   double compute_time_s{};
   double server_time_s{};
   double communication_time_s{};

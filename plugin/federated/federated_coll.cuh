@@ -21,5 +21,18 @@ class CUDAFederatedColl : public Coll {
                                   common::Span<std::int64_t const> sizes,
                                   common::Span<std::int64_t> recv_segments,
                                   common::Span<std::int8_t> recv, AllgatherVAlgo algo) override;
+  [[nodiscard]] Result ReportTiming(Comm const &comm,
+                                    std::vector<TimingRecord> const &rows) override {
+    return p_impl_->ReportTiming(comm, rows);
+  }
+  [[nodiscard]] double LastClientTotalTimeS() const override {
+    return p_impl_->LastClientTotalTimeS();
+  }
+  [[nodiscard]] double LastServerAggregationTimeS() const override {
+    return p_impl_->LastServerAggregationTimeS();
+  }
+  [[nodiscard]] double LastCommunicationTimeS() const override {
+    return p_impl_->LastCommunicationTimeS();
+  }
 };
 }  // namespace xgboost::collective

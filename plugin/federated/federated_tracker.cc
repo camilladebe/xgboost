@@ -56,7 +56,7 @@ grpc::Status FederatedService::ReportTiming(grpc::ServerContext*, ReportTimingRe
     rows.reserve(static_cast<std::size_t>(request->rows_size()));
     for (auto const& row : request->rows()) {
       rows.push_back(TimingRecord{row.iteration(), row.tree_id(), row.tree_node_id(),
-                                  row.compute_time_s(), row.server_time_s(),
+                                  row.rank(), row.compute_time_s(), row.server_time_s(),
                                   row.communication_time_s()});
     }
     tracker_->AppendTimingRows(rows);
@@ -104,7 +104,7 @@ std::future<Result> FederatedTracker::Run() {
         timing_header_written_ = true;
       }
       if (!timing_header_written_) {
-        timing_stream_ << "iteration,tree_id,tree_node_id,compute_time_s,server_time_s,communication_time_s\n";
+        timing_stream_ << "iteration,tree_id,tree_node_id,rank,compute_time_s,server_time_s,communication_time_s\n";
         timing_stream_.flush();
         timing_header_written_ = true;
       }
@@ -181,7 +181,7 @@ void FederatedTracker::AppendTimingRows(std::vector<TimingRecord> const& rows) c
   timing_stream_ << std::setprecision(17);
   for (auto const& row : rows) {
     timing_stream_ << row.iteration << ',' << row.tree_id << ',' << row.tree_node_id << ','
-                   << row.compute_time_s << ',' << row.server_time_s << ','
+                   << row.rank << ',' << row.compute_time_s << ',' << row.server_time_s << ','
                    << row.communication_time_s << '\n';
   }
   timing_stream_.flush();

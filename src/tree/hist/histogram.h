@@ -215,8 +215,8 @@ class HistogramBuilder {
         auto communication_time_s = backend->LastCommunicationTimeS();
         for (std::size_t i = 0; i < nodes_to_build.size(); ++i) {
           rows.push_back(collective::TimingRecord{iteration, tree_id, nodes_to_build[i],
-                                                  compute_times_s[i], server_time_s,
-                                                  communication_time_s});
+                                                  collective::GetRank(), compute_times_s[i],
+                                                  server_time_s, communication_time_s});
         }
         auto const &timing_comm = collective::GlobalCommGroup()->Ctx(ctx, ctx->Device());
         auto timing_rc = backend->ReportTiming(timing_comm, rows);

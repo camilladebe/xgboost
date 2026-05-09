@@ -67,6 +67,7 @@ namespace {
     timing_row->set_iteration(row.iteration);
     timing_row->set_tree_id(row.tree_id);
     timing_row->set_tree_node_id(row.tree_node_id);
+    timing_row->set_rank(row.rank);
     timing_row->set_compute_time_s(row.compute_time_s);
     timing_row->set_server_time_s(row.server_time_s);
     timing_row->set_communication_time_s(row.communication_time_s);
@@ -119,7 +120,7 @@ Coll *FederatedColl::MakeCUDAVar() {
   std::copy_n(r.cbegin(), r.size(), data.data());
   double server_agg_s = reply.server_aggregation_time_s();
   double client_max_s = reply.client_time_max_s();
-  double communication_s = client_total_time_s - server_agg_s;
+  double communication_s = std::max(0.0, client_total_time_s - server_agg_s);
   last_client_total_time_s_ = client_total_time_s;
   last_server_aggregation_time_s_ = server_agg_s;
   last_communication_time_s_ = communication_s;
