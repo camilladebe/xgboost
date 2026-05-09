@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>  // for int8_t, int64_t
 #include <memory>   // for enable_shared_from_this
+#include <vector>   // for vector
 
 #include "../data/array_interface.h"    // for ArrayInterfaceHandler
 #include "comm.h"                       // for Comm
@@ -11,6 +12,15 @@
 #include "xgboost/span.h"               // for Span
 
 namespace xgboost::collective {
+struct TimingRecord {
+  std::uint64_t iteration{};
+  std::uint64_t tree_id{};
+  std::int64_t tree_node_id{};
+  double compute_time_s{};
+  double server_time_s{};
+  double communication_time_s{};
+};
+
 enum class AllgatherVAlgo {
   kRing = 0,   // use ring-based allgather-v
   kBcast = 1,  // use broadcast-based allgather-v
@@ -64,5 +74,13 @@ class Coll : public std::enable_shared_from_this<Coll> {
                                           common::Span<std::int64_t const> sizes,
                                           common::Span<std::int64_t> recv_segments,
                                           common::Span<std::int8_t> recv, AllgatherVAlgo algo);
+
+  [[nodiscard]] virtual double LastClientTotalTimeS() const { return 0.0; }
+  [[nodiscard]] virtual double LastServerAggregationTimeS() const { return 0.0; }
+  [[nodiscard]] virtual double LastCommunicationTimeS() const { return 0.0; }
+
+  [[nodiscard]] virtual Result ReportTiming(Comm const&, std::vector<TimingRecord> const&) {
+    return Success();
+  }
 };
 }  // namespace xgboost::collective

@@ -5,9 +5,13 @@
 #include <federated.grpc.pb.h>  // for Server
 
 #include <future>  // for future
+#include <fstream>
 #include <memory>  // for unique_ptr
+#include <mutex>
 #include <string>  // for string
+#include <vector>
 
+#include "../../src/collective/coll.h"
 #include "../../src/collective/in_memory_handler.h"
 #include "../../src/collective/tracker.h"  // for Tracker
 #include "xgboost/collective/result.h"     // for Result
@@ -15,9 +19,12 @@
 
 namespace xgboost::collective {
 namespace federated {
+class FederatedTracker;
+
 class FederatedService final : public Federated::Service {
  public:
-  explicit FederatedService(std::int32_t world_size) : handler_{world_size} {}
+  explicit FederatedService(std::int32_t world_size, FederatedTracker* tracker)
+      : handler_{world_size}, tracker_{tracker} {}
 
   grpc::Status Allgather(grpc::ServerContext* context, AllgatherRequest const* request,
                          AllgatherReply* reply) override;
@@ -28,11 +35,15 @@ class FederatedService final : public Federated::Service {
   grpc::Status Allreduce(grpc::ServerContext* context, AllreduceRequest const* request,
                          AllreduceReply* reply) override;
 
+  grpc::Status ReportTiming(grpc::ServerContext* context, ReportTimingRequest const* request,
+                            ReportTimingReply* reply) override;
+
   grpc::Status Broadcast(grpc::ServerContext* context, BroadcastRequest const* request,
                          BroadcastReply* reply) override;
 
  private:
   xgboost::collective::InMemoryHandler handler_;
+  FederatedTracker* tracker_{nullptr};
 };
 };  // namespace federated
 
@@ -41,6 +52,11 @@ class FederatedTracker : public collective::Tracker {
   std::string server_key_path_;
   std::string server_cert_file_;
   std::string client_cert_file_;
+  bool timing_enabled_{false};
+  std::string timing_path_;
+  mutable std::mutex timing_mutex_;
+  mutable std::ofstream timing_stream_;
+  mutable bool timing_header_written_{false};
 
  public:
   /**
@@ -59,5 +75,7 @@ class FederatedTracker : public collective::Tracker {
 
   [[nodiscard]] Json WorkerArgs() const override;
   [[nodiscard]] Result Shutdown();
+
+  void AppendTimingRows(std::vector<TimingRecord> const& rows) const;
 };
 }  // namespace xgboost::collective

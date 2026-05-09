@@ -5,6 +5,7 @@
 
 #include <federated.grpc.pb.h>
 #include <federated.pb.h>
+#include <chrono>
 
 #include <algorithm>  // for copy_n
 
@@ -52,6 +53,34 @@ namespace {
 
   return Success();
 }
+
+[[nodiscard]] Result ReportTimingImpl(Comm const &comm, std::vector<TimingRecord> const &rows) {
+  using namespace federated;  // NOLINT
+
+  auto fed = dynamic_cast<FederatedComm const *>(&comm);
+  CHECK(fed);
+  auto stub = fed->Handle();
+
+  ReportTimingRequest request;
+  for (auto const &row : rows) {
+    auto *timing_row = request.add_rows();
+    timing_row->set_iteration(row.iteration);
+    timing_row->set_tree_id(row.tree_id);
+    timing_row->set_tree_node_id(row.tree_node_id);
+    timing_row->set_compute_time_s(row.compute_time_s);
+    timing_row->set_server_time_s(row.server_time_s);
+    timing_row->set_communication_time_s(row.communication_time_s);
+  }
+
+  ReportTimingReply reply;
+  grpc::ClientContext context;
+  context.set_wait_for_ready(true);
+  grpc::Status status = stub->ReportTiming(&context, request, &reply);
+  if (!status.ok()) {
+    return GetGRPCResult("ReportTiming", status);
+  }
+  return Success();
+}
 }  // namespace
 
 #if !defined(XGBOOST_USE_CUDA)
@@ -78,12 +107,25 @@ Coll *FederatedColl::MakeCUDAVar() {
   AllreduceReply reply;
   grpc::ClientContext context;
   context.set_wait_for_ready(true);
+  auto start = std::chrono::steady_clock::now();
   grpc::Status status = stub->Allreduce(&context, request, &reply);
+  auto end = std::chrono::steady_clock::now();
   if (!status.ok()) {
     return GetGRPCResult("Allreduce", status);
   }
+  std::chrono::duration<double> dur = end - start;
+  double client_total_time_s = dur.count();
   auto const &r = reply.receive_buffer();
   std::copy_n(r.cbegin(), r.size(), data.data());
+  double server_agg_s = reply.server_aggregation_time_s();
+  double client_max_s = reply.client_time_max_s();
+  double communication_s = client_total_time_s - server_agg_s;
+  last_client_total_time_s_ = client_total_time_s;
+  last_server_aggregation_time_s_ = server_agg_s;
+  last_communication_time_s_ = communication_s;
+  LOG(INFO) << "[AllReduce rank=" << comm.Rank() << "] client_total_s=" << client_total_time_s
+            << " client_max_s=" << client_max_s << " server_agg_s=" << server_agg_s
+            << " communication_s=" << communication_s;
   return Success();
 }
 
@@ -147,5 +189,10 @@ Coll *FederatedColl::MakeCUDAVar() {
   CHECK_EQ(r.size(), recv.size());
   std::copy_n(r.cbegin(), r.size(), recv.begin());
   return Success();
+}
+
+[[nodiscard]] Result FederatedColl::ReportTiming(Comm const &comm,
+                                                 std::vector<TimingRecord> const &rows) {
+  return ReportTimingImpl(comm, rows);
 }
 }  // namespace xgboost::collective

@@ -94,13 +94,14 @@ void CheckPartitionerLeaves(std::vector<CommonRowPartitioner> const &partitioner
 template <typename ExpandEntry, typename Updater>
 void UpdateTree(common::Monitor *monitor, linalg::MatrixView<GradientPair const> gpair,
                 Updater *updater, DMatrix *p_fmat, TrainParam const *param,
-                HostDeviceVector<bst_node_t> *p_out_position, RegTree *p_tree) {
+                HostDeviceVector<bst_node_t> *p_out_position, RegTree *p_tree,
+                std::uint64_t iteration, std::uint64_t tree_id) {
   monitor->Start(__func__);
   updater->InitData(p_fmat, p_tree, gpair);
 
   Driver<ExpandEntry> driver{*param};
   auto const &tree = *p_tree;
-  driver.Push(updater->InitRoot(p_fmat, gpair, p_tree));
+  driver.Push(updater->InitRoot(p_fmat, gpair, p_tree, iteration, tree_id));
   auto expand_set = driver.Pop();
 
   /**
@@ -130,7 +131,7 @@ void UpdateTree(common::Monitor *monitor, linalg::MatrixView<GradientPair const>
 
     std::vector<ExpandEntry> best_splits;
     if (!valid_candidates.empty()) {
-      updater->BuildHistogram(p_fmat, p_tree, valid_candidates, gpair);
+      updater->BuildHistogram(p_fmat, p_tree, valid_candidates, gpair, iteration, tree_id);
       for (auto const &candidate : valid_candidates) {
         auto left_child_nidx = tree.LeftChild(candidate.nid);
         auto right_child_nidx = tree.RightChild(candidate.nid);
@@ -226,7 +227,7 @@ class MultiTargetHistBuilder {
   }
 
   MultiExpandEntry InitRoot(DMatrix *p_fmat, linalg::MatrixView<GradientPair const> gpair,
-                            RegTree *p_tree) {
+                            RegTree *p_tree, std::uint64_t iteration, std::uint64_t tree_id) {
     monitor_->Start(__func__);
     MultiExpandEntry best;
     best.nid = RegTree::kRoot;
@@ -244,7 +245,7 @@ class MultiTargetHistBuilder {
     collective::SafeColl(rc);
 
     histogram_builder_->BuildRootHist(p_fmat, p_tree->HostMtView(), partitioner_, gpair, best,
-                                      HistBatch(param_));
+                      HistBatch(param_), iteration, tree_id);
 
     auto weight = evaluator_->InitRoot(h_root_sum);
     auto weight_t = weight.HostView();
@@ -274,10 +275,12 @@ class MultiTargetHistBuilder {
 
   void BuildHistogram(DMatrix *p_fmat, RegTree const *p_tree,
                       std::vector<MultiExpandEntry> const &valid_candidates,
-                      linalg::MatrixView<GradientPair const> gpair) {
+                      linalg::MatrixView<GradientPair const> gpair, std::uint64_t iteration,
+                      std::uint64_t tree_id) {
     monitor_->Start(__func__);
     histogram_builder_->BuildHistLeftRight(ctx_, p_fmat, p_tree->HostMtView(), partitioner_,
-                                           valid_candidates, gpair, HistBatch(param_));
+                                           valid_candidates, gpair, HistBatch(param_), iteration,
+                                           tree_id);
     monitor_->Stop(__func__);
   }
 
@@ -507,12 +510,12 @@ class HistUpdater {
   }
 
   CPUExpandEntry InitRoot(DMatrix *p_fmat, linalg::MatrixView<GradientPair const> gpair,
-                          RegTree *p_tree) {
+                          RegTree *p_tree, std::uint64_t iteration, std::uint64_t tree_id) {
     monitor_->Start(__func__);
     CPUExpandEntry node(RegTree::kRoot, p_tree->GetDepth(0));
 
     this->histogram_builder_->BuildRootHist(p_fmat, p_tree->HostScView(), partitioner_, gpair, node,
-                                            HistBatch(param_));
+                        HistBatch(param_), iteration, tree_id);
 
     {
       GradientPairPrecise grad_stat;
@@ -565,10 +568,12 @@ class HistUpdater {
 
   void BuildHistogram(DMatrix *p_fmat, RegTree *p_tree,
                       std::vector<CPUExpandEntry> const &valid_candidates,
-                      linalg::MatrixView<GradientPair const> gpair) {
+                      linalg::MatrixView<GradientPair const> gpair, std::uint64_t iteration,
+                      std::uint64_t tree_id) {
     monitor_->Start(__func__);
     this->histogram_builder_->BuildHistLeftRight(ctx_, p_fmat, p_tree->HostScView(), partitioner_,
-                                                 valid_candidates, gpair, HistBatch(param_));
+                                                 valid_candidates, gpair, HistBatch(param_),
+                                                 iteration, tree_id);
     monitor_->Stop(__func__);
   }
 
@@ -623,6 +628,7 @@ class QuantileHistMaker : public TreeUpdater {
   void Update(TrainParam const *param, GradientContainer *in_gpair, DMatrix *p_fmat,
               common::Span<HostDeviceVector<bst_node_t>> out_position,
               const std::vector<RegTree *> &trees) override {
+    auto const iteration = iteration_++;
     if (!column_sampler_) {
       column_sampler_ = common::MakeColumnSampler(ctx_);
     }
@@ -670,9 +676,10 @@ class QuantileHistMaker : public TreeUpdater {
       }
       sampler.Sample(ctx_, h_sample_out);
       auto *h_out_position = &out_position[tree_it - trees.begin()];
+      auto const tree_id = static_cast<std::uint64_t>(tree_it - trees.begin());
       if ((*tree_it)->IsMultiTarget()) {
         UpdateTree<MultiExpandEntry>(&monitor_, h_sample_out, p_mtimpl_.get(), p_fmat, param,
-                                     h_out_position, *tree_it);
+                                     h_out_position, *tree_it, iteration, tree_id);
         if (in_gpair->HasValueGrad()) {
           // Copy the value gradient and apply sampling mask from split gradient
           auto value_grad = linalg::Empty<GradientPair>(ctx_, in_gpair->value_gpair.Shape(0),
@@ -689,12 +696,14 @@ class QuantileHistMaker : public TreeUpdater {
         }
       } else {
         UpdateTree<CPUExpandEntry>(&monitor_, h_sample_out, p_impl_.get(), p_fmat, param,
-                                   h_out_position, *tree_it);
+                                   h_out_position, *tree_it, iteration, tree_id);
       }
 
       hist_param_.CheckTreesSynchronized(ctx_, *tree_it);
     }
   }
+
+  std::uint64_t iteration_{0};
 
   bool UpdatePredictionCache(DMatrix const *p_fmat,
                              common::Span<HostDeviceVector<bst_node_t>> node_position,

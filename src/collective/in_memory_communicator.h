@@ -75,8 +75,11 @@ class InMemoryCommunicator {
   void AllReduce(void* in_out, std::size_t size, DataType data_type, Operation operation) override {
     auto const bytes = size * GetTypeSize(data_type);
     std::string output;
-    handler_.Allreduce(static_cast<const char*>(in_out), bytes, &output, sequence_number_++,
-                       GetRank(), data_type, operation);
+    double client_time_dummy = 0.0;
+    double client_time_max = 0.0;
+    double server_agg_time = 0.0;
+    handler_.Allreduce(static_cast<const char*>(in_out), bytes, &output, sequence_number_++, GetRank(), data_type, operation,
+                       client_time_dummy, &client_time_max, &server_agg_time);
     output.copy(static_cast<char*>(in_out), bytes);
   }
 

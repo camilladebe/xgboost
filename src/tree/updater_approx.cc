@@ -99,7 +99,8 @@ class GlobalApproxBuilder {
   }
 
   CPUExpandEntry InitRoot(DMatrix *p_fmat, std::vector<GradientPair> const &gpair,
-                          common::Span<float> hess, RegTree *p_tree) {
+                          common::Span<float> hess, RegTree *p_tree, std::uint64_t iteration,
+                          std::uint64_t tree_id) {
     monitor_->Start(__func__);
     CPUExpandEntry best;
     best.nid = RegTree::kRoot;
@@ -114,8 +115,8 @@ class GlobalApproxBuilder {
 
     std::vector<CPUExpandEntry> nodes{best};
     this->histogram_builder_.BuildRootHist(p_fmat, p_tree->HostScView(), partitioner_,
-                                           linalg::MakeTensorView(ctx_, gpair, gpair.size(), 1),
-                                           best, BatchSpec(*param_, hess));
+                         linalg::MakeTensorView(ctx_, gpair, gpair.size(), 1),
+                         best, BatchSpec(*param_, hess), iteration, tree_id);
 
     auto weight = evaluator_.InitRoot(root_sum);
     p_tree->Stat(RegTree::kRoot).sum_hess = root_sum.GetHess();
@@ -143,11 +144,13 @@ class GlobalApproxBuilder {
 
   void BuildHistogram(DMatrix *p_fmat, RegTree *p_tree,
                       std::vector<CPUExpandEntry> const &valid_candidates,
-                      std::vector<GradientPair> const &gpair, common::Span<float> hess) {
+                      std::vector<GradientPair> const &gpair, common::Span<float> hess,
+                      std::uint64_t iteration, std::uint64_t tree_id) {
     monitor_->Start(__func__);
     this->histogram_builder_.BuildHistLeftRight(
         ctx_, p_fmat, p_tree->HostScView(), partitioner_, valid_candidates,
-        linalg::MakeTensorView(ctx_, gpair, gpair.size(), 1), BatchSpec(*param_, hess));
+        linalg::MakeTensorView(ctx_, gpair, gpair.size(), 1), BatchSpec(*param_, hess),
+        iteration, tree_id);
     monitor_->Stop(__func__);
   }
 
@@ -176,13 +179,14 @@ class GlobalApproxBuilder {
         monitor_{monitor} {}
 
   void UpdateTree(DMatrix *p_fmat, std::vector<GradientPair> const &gpair, common::Span<float> hess,
-                  RegTree *p_tree, HostDeviceVector<bst_node_t> *p_out_position) {
+                  RegTree *p_tree, HostDeviceVector<bst_node_t> *p_out_position,
+                  std::uint64_t iteration, std::uint64_t tree_id) {
     p_last_tree_ = p_tree;
     this->InitData(p_fmat, p_tree, hess);
 
     Driver<CPUExpandEntry> driver(*param_);
     auto &tree = *p_tree;
-    driver.Push({this->InitRoot(p_fmat, gpair, hess, p_tree)});
+    driver.Push({this->InitRoot(p_fmat, gpair, hess, p_tree, iteration, tree_id)});
     auto expand_set = driver.Pop();
 
     /**
@@ -219,7 +223,7 @@ class GlobalApproxBuilder {
 
       std::vector<CPUExpandEntry> best_splits;
       if (!valid_candidates.empty()) {
-        this->BuildHistogram(p_fmat, p_tree, valid_candidates, gpair, hess);
+        this->BuildHistogram(p_fmat, p_tree, valid_candidates, gpair, hess, iteration, tree_id);
         for (auto const &candidate : valid_candidates) {
           int left_child_nidx = tree[candidate.nid].LeftChild();
           int right_child_nidx = tree[candidate.nid].RightChild();
@@ -287,6 +291,7 @@ class GlobalApproxUpdater : public TreeUpdater {
   void Update(TrainParam const *param, GradientContainer *in_gpair, DMatrix *m,
               common::Span<HostDeviceVector<bst_node_t>> out_position,
               const std::vector<RegTree *> &trees) override {
+    auto const iteration = iteration_++;
     CHECK(hist_param_.GetInitialised());
     if (!column_sampler_) {
       column_sampler_ = common::MakeColumnSampler(ctx_);
@@ -307,11 +312,13 @@ class GlobalApproxUpdater : public TreeUpdater {
 
     std::size_t t_idx = 0;
     for (auto p_tree : trees) {
-      this->pimpl_->UpdateTree(m, s_gpair, hess, p_tree, &out_position[t_idx]);
+      this->pimpl_->UpdateTree(m, s_gpair, hess, p_tree, &out_position[t_idx], iteration, t_idx);
       hist_param_.CheckTreesSynchronized(ctx_, p_tree);
       ++t_idx;
     }
   }
+
+  std::uint64_t iteration_{0};
 
   bool UpdatePredictionCache(DMatrix const *p_fmat,
                              common::Span<HostDeviceVector<bst_node_t>> out_position,

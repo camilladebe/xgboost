@@ -9,6 +9,9 @@ namespace xgboost::collective {
 class FederatedColl : public Coll {
  private:
   std::uint64_t sequence_number_{0};
+    double last_client_total_time_s_{0.0};
+    double last_server_aggregation_time_s_{0.0};
+    double last_communication_time_s_{0.0};
 
  public:
   Coll *MakeCUDAVar() override;
@@ -22,5 +25,12 @@ class FederatedColl : public Coll {
                                   common::Span<std::int64_t const> sizes,
                                   common::Span<std::int64_t> recv_segments,
                                   common::Span<std::int8_t> recv, AllgatherVAlgo algo) override;
+    [[nodiscard]] Result ReportTiming(Comm const &comm, std::vector<TimingRecord> const &rows) override;
+
+    [[nodiscard]] double LastClientTotalTimeS() const override { return last_client_total_time_s_; }
+    [[nodiscard]] double LastServerAggregationTimeS() const override {
+      return last_server_aggregation_time_s_;
+    }
+    [[nodiscard]] double LastCommunicationTimeS() const override { return last_communication_time_s_; }
 };
 }  // namespace xgboost::collective

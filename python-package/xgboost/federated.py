@@ -32,6 +32,12 @@ class FederatedTracker(RabitTracker):
     client_cert_path :
         Path to the client certificate file.
 
+    timing_enabled :
+        Whether to write federated timing rows to CSV on the server.
+
+    timing_path :
+        Output CSV path on the server when timing is enabled.
+
     """
 
     @_deprecate_positional_args
@@ -44,6 +50,8 @@ class FederatedTracker(RabitTracker):
         server_key_path: Optional[str] = None,
         server_cert_path: Optional[str] = None,
         client_cert_path: Optional[str] = None,
+        timing_enabled: bool = False,
+        timing_path: Optional[str] = None,
         timeout: int = 300,
     ) -> None:
         handle = ctypes.c_void_p()
@@ -55,6 +63,10 @@ class FederatedTracker(RabitTracker):
             server_key_path=server_key_path,
             server_cert_path=server_cert_path,
             client_cert_path=client_cert_path,
+            **{
+                "federated_timing.enabled": timing_enabled,
+                "federated_timing.path": timing_path,
+            },
             timeout=int(timeout),
         )
         _check_call(_LIB.XGTrackerCreate(args, ctypes.byref(handle)))
@@ -69,6 +81,8 @@ def run_federated_server(  # pylint: disable=too-many-arguments
     server_key_path: Optional[str] = None,
     server_cert_path: Optional[str] = None,
     client_cert_path: Optional[str] = None,
+    timing_enabled: bool = False,
+    timing_path: Optional[str] = None,
     blocking: bool = True,
     timeout: int = 300,
 ) -> Optional[Dict[str, Any]]:
@@ -95,6 +109,8 @@ def run_federated_server(  # pylint: disable=too-many-arguments
         server_key_path=server_key_path,
         server_cert_path=server_cert_path,
         client_cert_path=client_cert_path,
+        timing_enabled=timing_enabled,
+        timing_path=timing_path,
     )
     tracker.start()
 

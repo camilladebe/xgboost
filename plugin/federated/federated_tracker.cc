@@ -9,8 +9,12 @@
 #include <cstdint>    // for int32_t
 #include <exception>  // for exception
 #include <future>     // for future, async
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>     // for numeric_limits
 #include <string>     // for string
+#include <vector>
 
 #include "../../src/common/io.h"          // for ReadAll
 #include "../../src/common/json_utils.h"  // for RequiredArg
@@ -33,10 +37,30 @@ grpc::Status FederatedService::AllgatherV(grpc::ServerContext*, AllgatherVReques
 
 grpc::Status FederatedService::Allreduce(grpc::ServerContext*, AllreduceRequest const* request,
                                          AllreduceReply* reply) {
+  double client_time_max = 0.0;
+  double server_aggregation_time = 0.0;
   handler_.Allreduce(request->send_buffer().data(), request->send_buffer().size(),
                      reply->mutable_receive_buffer(), request->sequence_number(), request->rank(),
                      static_cast<xgboost::ArrayInterfaceHandler::Type>(request->data_type()),
-                     static_cast<xgboost::collective::Op>(request->reduce_operation()));
+                     static_cast<xgboost::collective::Op>(request->reduce_operation()),
+                     request->client_total_time_s(), &client_time_max, &server_aggregation_time);
+  reply->set_server_aggregation_time_s(server_aggregation_time);
+  reply->set_client_time_max_s(client_time_max);
+  return grpc::Status::OK;
+}
+
+grpc::Status FederatedService::ReportTiming(grpc::ServerContext*, ReportTimingRequest const* request,
+                                            ReportTimingReply*) {
+  if (tracker_ != nullptr) {
+    std::vector<TimingRecord> rows;
+    rows.reserve(static_cast<std::size_t>(request->rows_size()));
+    for (auto const& row : request->rows()) {
+      rows.push_back(TimingRecord{row.iteration(), row.tree_id(), row.tree_node_id(),
+                                  row.compute_time_s(), row.server_time_s(),
+                                  row.communication_time_s()});
+    }
+    tracker_->AppendTimingRows(rows);
+  }
   return grpc::Status::OK;
 }
 
@@ -60,14 +84,31 @@ FederatedTracker::FederatedTracker(Json const& config) : Tracker{config} {
     client_cert_file_ = RequiredArg<String const>(config, "client_cert_path", __func__);
     CHECK(!client_cert_file_.empty()) << msg;
   }
+
+  timing_enabled_ = OptionalArg<Boolean>(config, "federated_timing.enabled", Boolean{false});
+  timing_path_ = OptionalArg<String>(config, "federated_timing.path", std::string{});
 }
 
 std::future<Result> FederatedTracker::Run() {
   return std::async(std::launch::async, [this]() {
     std::string const server_address = "0.0.0.0:" + std::to_string(this->port_);
     xgboost::collective::federated::FederatedService service{
-        static_cast<std::int32_t>(this->n_workers_)};
+        static_cast<std::int32_t>(this->n_workers_), this};
     grpc::ServerBuilder builder;
+
+    if (timing_enabled_ && !timing_path_.empty()) {
+      std::lock_guard<std::mutex> lk(timing_mutex_);
+      timing_stream_.open(timing_path_, std::ios::out | std::ios::app);
+      CHECK(timing_stream_.is_open()) << "Failed to open timing CSV: " << timing_path_;
+      if (std::filesystem::exists(timing_path_) && std::filesystem::file_size(timing_path_) > 0) {
+        timing_header_written_ = true;
+      }
+      if (!timing_header_written_) {
+        timing_stream_ << "iteration,tree_id,tree_node_id,compute_time_s,server_time_s,communication_time_s\n";
+        timing_stream_.flush();
+        timing_header_written_ = true;
+      }
+    }
 
     if (this->server_cert_file_.empty()) {
       builder.SetMaxReceiveMessageSize(std::numeric_limits<std::int32_t>::max());
@@ -124,6 +165,26 @@ Result FederatedTracker::Shutdown() {
   }
 
   return Success();
+}
+
+void FederatedTracker::AppendTimingRows(std::vector<TimingRecord> const& rows) const {
+  if (!timing_enabled_ || timing_path_.empty() || rows.empty()) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lk(timing_mutex_);
+  if (!timing_stream_.is_open()) {
+    timing_stream_.open(timing_path_, std::ios::out | std::ios::app);
+    CHECK(timing_stream_.is_open()) << "Failed to open timing CSV: " << timing_path_;
+  }
+
+  timing_stream_ << std::setprecision(17);
+  for (auto const& row : rows) {
+    timing_stream_ << row.iteration << ',' << row.tree_id << ',' << row.tree_node_id << ','
+                   << row.compute_time_s << ',' << row.server_time_s << ','
+                   << row.communication_time_s << '\n';
+  }
+  timing_stream_.flush();
 }
 
 [[nodiscard]] Json FederatedTracker::WorkerArgs() const {

@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <functional>
+#include <chrono>
+#include <mutex>
 #include "comm.h"
 
 namespace xgboost::collective {
@@ -67,8 +69,10 @@ class AllreduceFunctor {
  public:
   std::string const name{"Allreduce"};
 
-  AllreduceFunctor(ArrayInterfaceHandler::Type dataType, Op operation)
-      : data_type_{dataType}, operation_{operation} {}
+  AllreduceFunctor(ArrayInterfaceHandler::Type dataType, Op operation,
+                  double *aggregation_time_s, std::mutex *aggregation_mutex)
+      : data_type_{dataType}, operation_{operation}, aggregation_time_s_{aggregation_time_s},
+        aggregation_mutex_{aggregation_mutex} {}
 
   void operator()(char const* input, std::size_t bytes, std::string* buffer) const {
     if (buffer->empty()) {
@@ -77,7 +81,14 @@ class AllreduceFunctor {
     } else {
       auto n_bytes_type = DispatchDType(data_type_, [](auto t) { return sizeof(t); });
       // Apply the reduce_operation to the input and the buffer.
+      auto start = std::chrono::steady_clock::now();
       Accumulate(input, bytes / n_bytes_type, &buffer->front());
+      auto end = std::chrono::steady_clock::now();
+      std::chrono::duration<double> dur = end - start;
+      if (aggregation_time_s_ && aggregation_mutex_) {
+        std::lock_guard<std::mutex> lg(*aggregation_mutex_);
+        *aggregation_time_s_ += dur.count();
+      }
     }
   }
 
@@ -171,6 +182,8 @@ class AllreduceFunctor {
  private:
   ArrayInterfaceHandler::Type data_type_;
   Op operation_;
+  double *aggregation_time_s_{};
+  std::mutex *aggregation_mutex_{};
 };
 
 /**
@@ -231,8 +244,41 @@ void InMemoryHandler::AllgatherV(char const* input, std::size_t bytes, std::stri
 
 void InMemoryHandler::Allreduce(char const* input, std::size_t bytes, std::string* output,
                                 std::size_t sequence_number, std::int32_t rank,
-                                ArrayInterfaceHandler::Type data_type, Op op) {
-  Handle(input, bytes, output, sequence_number, rank, AllreduceFunctor{data_type, op});
+                                ArrayInterfaceHandler::Type data_type, Op op,
+                                double client_total_time_s, double* out_client_time_max_s,
+                                double* out_server_aggregation_time_s) {
+  // Update max client time for this sequence.
+  {
+    std::lock_guard<std::mutex> lg(mutex_);
+    auto it = client_time_max_.find(sequence_number);
+    if (it == client_time_max_.end()) {
+      client_time_max_[sequence_number] = client_total_time_s;
+    } else {
+      it->second = std::max(it->second, client_total_time_s);
+    }
+  }
+
+  double aggregation_time_s = 0.0;
+  std::mutex aggregation_mutex;
+  Handle(input, bytes, output, sequence_number, rank,
+         AllreduceFunctor{data_type, op, &aggregation_time_s, &aggregation_mutex});
+
+  double client_max = 0.0;
+  {
+    std::lock_guard<std::mutex> lg(mutex_);
+    auto it = client_time_max_.find(sequence_number);
+    if (it != client_time_max_.end()) {
+      client_max = it->second;
+      client_time_max_.erase(it);
+    }
+  }
+
+  if (out_client_time_max_s) {
+    *out_client_time_max_s = client_max;
+  }
+  if (out_server_aggregation_time_s) {
+    *out_server_aggregation_time_s = aggregation_time_s;
+  }
 }
 
 void InMemoryHandler::Broadcast(char const* input, std::size_t bytes, std::string* output,

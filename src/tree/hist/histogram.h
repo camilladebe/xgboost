@@ -5,12 +5,14 @@
 #define XGBOOST_TREE_HIST_HISTOGRAM_H_
 
 #include <algorithm>   // for max
+#include <chrono>
 #include <cstddef>     // for size_t
 #include <cstdint>     // for int32_t
 #include <utility>     // for move
 #include <vector>      // for vector
 
 #include "../../collective/allreduce.h"    // for Allreduce
+#include "../../collective/communicator-inl.h"  // for IsFederated
 #include "../../common/hist_util.h"        // for GHistRow, ParallelGHi...
 #include "../../common/row_set.h"          // for RowSetCollection
 #include "../../common/threading_utils.h"  // for ParallelFor2d, Range1d, BlockedSpace2d
@@ -74,7 +76,8 @@ class HistogramBuilder {
   void BuildLocalHistograms(common::BlockedSpace2d const &space, GHistIndexMatrix const &gidx,
                             std::vector<bst_node_t> const &nodes_to_build,
                             common::RowSetCollection const &row_set_collection,
-                            common::Span<GradientPair const> gpair_h, bool read_by_column) {
+                            common::Span<GradientPair const> gpair_h, bool read_by_column,
+                            std::vector<double> *compute_times_s) {
     // Parallel processing by nodes and data in each node
     common::ParallelFor2d(space, this->n_threads_, [&](size_t nid_in_set, common::Range1d r) {
       const auto tid = static_cast<unsigned>(omp_get_thread_num());
@@ -86,7 +89,13 @@ class HistogramBuilder {
                                                    elem.begin() + end_of_row_set};
       auto hist = buffer_.GetInitializedHist(tid, nid_in_set);
       if (rid_set.size() != 0) {
+        auto start = std::chrono::steady_clock::now();
         common::BuildHist<any_missing>(gpair_h, rid_set, gidx, hist, read_by_column);
+        auto end = std::chrono::steady_clock::now();
+        if (compute_times_s != nullptr) {
+          std::chrono::duration<double> dur = end - start;
+          (*compute_times_s)[nid_in_set] += dur.count();
+        }
       }
     });
   }
@@ -150,7 +159,8 @@ class HistogramBuilder {
   void BuildHist(std::size_t page_idx, common::BlockedSpace2d const &space,
                  GHistIndexMatrix const &gidx, common::RowSetCollection const &row_set_collection,
                  std::vector<bst_node_t> const &nodes_to_build,
-                 linalg::VectorView<GradientPair const> gpair, bool read_by_column) {
+                 linalg::VectorView<GradientPair const> gpair, bool read_by_column,
+                 std::vector<double> *compute_times_s) {
     monitor_.Start(__func__);
     CHECK(gpair.Contiguous());
 
@@ -167,10 +177,10 @@ class HistogramBuilder {
 
     if (gidx.IsDense()) {
       this->BuildLocalHistograms<false>(space, gidx, nodes_to_build, row_set_collection,
-                                        gpair.Values(), read_by_column);
+                                        gpair.Values(), read_by_column, compute_times_s);
     } else {
       this->BuildLocalHistograms<true>(space, gidx, nodes_to_build, row_set_collection,
-                                       gpair.Values(), read_by_column);
+                                       gpair.Values(), read_by_column, compute_times_s);
     }
     monitor_.Stop(__func__);
   }
@@ -178,7 +188,8 @@ class HistogramBuilder {
   template <typename TreeView>
   void SyncHistogram(Context const *ctx, TreeView const &tree,
                      std::vector<bst_node_t> const &nodes_to_build,
-                     std::vector<bst_node_t> const &nodes_to_trick) {
+                     std::vector<bst_node_t> const &nodes_to_trick, std::uint64_t iteration,
+                     std::uint64_t tree_id, std::vector<double> const &compute_times_s) {
     auto n_total_bins = buffer_.TotalBins();
     common::BlockedSpace2d space(
         nodes_to_build.size(), [&](std::size_t) { return n_total_bins; }, 1024);
@@ -195,6 +206,22 @@ class HistogramBuilder {
           ctx, linalg::MakeVec(reinterpret_cast<double *>(this->hist_[first_nidx].data()), n),
           collective::Op::kSum);
       SafeColl(rc);
+
+      auto backend = collective::GlobalCommGroup()->Backend(ctx->Device());
+      if (collective::IsFederated()) {
+        std::vector<collective::TimingRecord> rows;
+        rows.reserve(nodes_to_build.size());
+        auto server_time_s = backend->LastServerAggregationTimeS();
+        auto communication_time_s = backend->LastCommunicationTimeS();
+        for (std::size_t i = 0; i < nodes_to_build.size(); ++i) {
+          rows.push_back(collective::TimingRecord{iteration, tree_id, nodes_to_build[i],
+                                                  compute_times_s[i], server_time_s,
+                                                  communication_time_s});
+        }
+        auto const &timing_comm = collective::GlobalCommGroup()->Ctx(ctx, ctx->Device());
+        auto timing_rc = backend->ReportTiming(timing_comm, rows);
+        SafeColl(timing_rc);
+      }
     }
 
     common::BlockedSpace2d const &subspace =
@@ -352,12 +379,14 @@ class MultiHistogramBuilder {
   void BuildRootHist(DMatrix *p_fmat, TreeView const &tree,
                      std::vector<Partitioner> const &partitioners,
                      linalg::MatrixView<GradientPair const> gpair, ExpandEntry const &best,
-                     BatchParam const &param, bool force_read_by_column = false) {
+                     BatchParam const &param, std::uint64_t iteration, std::uint64_t tree_id,
+                     bool force_read_by_column = false) {
     auto n_targets = gpair.Shape(1);
     CHECK_EQ(p_fmat->Info().num_row_, gpair.Shape(0));
     CHECK_EQ(target_builders_.size(), n_targets);
     std::vector<bst_node_t> nodes{best.nid};
     std::vector<bst_node_t> dummy_sub;
+    std::vector<double> compute_times_s(nodes.size(), 0.0);
 
     for (bst_target_t t{0}; t < n_targets; ++t) {
       this->target_builders_[t].AddHistRows(tree, &nodes, &dummy_sub, false);
@@ -374,13 +403,14 @@ class MultiHistogramBuilder {
         auto t_gpair = gpair.Slice(linalg::All(), t);
         this->target_builders_[t].BuildHist(page_idx, space, gidx,
                                             partitioners[page_idx].Partitions(), nodes, t_gpair,
-                                            read_by_column);
+                                            read_by_column, &compute_times_s);
       }
       ++page_idx;
     }
 
     for (bst_target_t t = 0; t < n_targets; ++t) {
-      this->target_builders_[t].SyncHistogram(ctx_, tree, nodes, dummy_sub);
+      this->target_builders_[t].SyncHistogram(ctx_, tree, nodes, dummy_sub, iteration, tree_id,
+                                              compute_times_s);
     }
   }
   /**
@@ -391,6 +421,7 @@ class MultiHistogramBuilder {
                           std::vector<Partitioner> const &partitioners,
                           std::vector<ExpandEntry> const &valid_candidates,
                           linalg::MatrixView<GradientPair const> gpair, BatchParam const &param,
+                          std::uint64_t iteration, std::uint64_t tree_id,
                           bool force_read_by_column = false) {
     std::vector<bst_node_t> nodes_to_build(valid_candidates.size());
     std::vector<bst_node_t> nodes_to_sub(valid_candidates.size());
@@ -405,6 +436,7 @@ class MultiHistogramBuilder {
     for (bst_target_t t = 1; t < target_builders_.size(); ++t) {
       target_builders_[t].AddHistRows(tree, &nodes_to_build, &nodes_to_sub, false);
     }
+    std::vector<double> compute_times_s(nodes_to_build.size(), 0.0);
 
     std::size_t page_idx{0};
     for (auto const &page : p_fmat->GetBatches<GHistIndexMatrix>(ctx_, param)) {
@@ -419,14 +451,15 @@ class MultiHistogramBuilder {
         CHECK_EQ(t_gpair.Shape(0), p_fmat->Info().num_row_);
         this->target_builders_[t].BuildHist(page_idx, space, page,
                                             partitioners[page_idx].Partitions(), nodes_to_build,
-                                            t_gpair, read_by_column);
+                                            t_gpair, read_by_column, &compute_times_s);
       }
       page_idx++;
     }
 
     auto n_targets = gpair.Shape(1);
     for (bst_target_t t = 0; t < n_targets; ++t) {
-      this->target_builders_[t].SyncHistogram(ctx, tree, nodes_to_build, nodes_to_sub);
+      this->target_builders_[t].SyncHistogram(ctx, tree, nodes_to_build, nodes_to_sub, iteration,
+                                              tree_id, compute_times_s);
     }
   }
 
