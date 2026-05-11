@@ -211,12 +211,14 @@ class HistogramBuilder {
       if (collective::IsFederated()) {
         std::vector<collective::TimingRecord> rows;
         rows.reserve(nodes_to_build.size());
+        auto client_time_s = backend->LastClientTotalTimeS();
         auto server_time_s = backend->LastServerAggregationTimeS();
         auto communication_time_s = backend->LastCommunicationTimeS();
         for (std::size_t i = 0; i < nodes_to_build.size(); ++i) {
           rows.push_back(collective::TimingRecord{iteration, tree_id, nodes_to_build[i],
                                                   collective::GetRank(), compute_times_s[i],
-                                                  server_time_s, communication_time_s});
+                                                  client_time_s, server_time_s,
+                                                  communication_time_s});
         }
         auto const &timing_comm = collective::GlobalCommGroup()->Ctx(ctx, ctx->Device());
         auto timing_rc = backend->ReportTiming(timing_comm, rows);

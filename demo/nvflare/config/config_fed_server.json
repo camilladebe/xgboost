@@ -16,7 +16,7 @@
         "server_cert_path": "server-cert.pem",
         "client_cert_path": "client-cert.pem",
         "timing_enabled": true,
-        "timing_path": "federated_timing.csv"
+        "timing_path": "~/FederatedLearning/nvflare-impl/results/federated_timing.csv"
       }
     }
   ],

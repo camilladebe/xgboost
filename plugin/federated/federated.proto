@@ -66,7 +66,7 @@ message AllreduceRequest {
   bytes send_buffer = 3;
   DataType data_type = 4;
   ReduceOperation reduce_operation = 5;
-  // Total time measured by the client for the Allreduce call (seconds).
+  // Client time between receiving the previous aggregate and sending this request.
   double client_total_time_s = 6;
 }
 
@@ -76,6 +76,8 @@ message AllreduceReply {
   double server_aggregation_time_s = 2;
   // Maximum client total time across all workers for this round (seconds).
   double client_time_max_s = 3;
+  // Wall-clock time spent inside the server-side Allreduce handler (seconds).
+  double server_handler_time_s = 4;
 }
 
 message TimingRow {
@@ -86,6 +88,8 @@ message TimingRow {
   double compute_time_s = 5;
   double server_time_s = 6;
   double communication_time_s = 7;
+  // Client time between receiving the previous aggregate and sending this local histogram.
+  double client_time_s = 8;
 }
 
 message ReportTimingRequest {

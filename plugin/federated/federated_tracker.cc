@@ -6,6 +6,9 @@
 #include <grpcpp/security/server_credentials.h>  // for InsecureServerCredentials, ...
 #include <grpcpp/server_builder.h>               // for ServerBuilder
 
+#include <algorithm>  // for max, min
+#include <chrono>     // for steady_clock
+#include <cstdlib>    // for getenv
 #include <cstdint>    // for int32_t
 #include <exception>  // for exception
 #include <future>     // for future, async
@@ -20,6 +23,35 @@
 #include "../../src/common/json_utils.h"  // for RequiredArg
 
 namespace xgboost::collective {
+namespace {
+std::string ExpandUserPath(std::string path) {
+  if (path == "~" || path.rfind("~/", 0) == 0) {
+    auto const* home = std::getenv("HOME");
+    if (home != nullptr) {
+      path.replace(0, 1, home);
+    }
+  }
+  return path;
+}
+
+void EnsureTimingDirectory(std::string const& timing_path) {
+  auto const parent = std::filesystem::path{timing_path}.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+}
+
+std::string MakeTimingSummaryPath(std::string const& timing_path) {
+  if (timing_path.empty()) {
+    return "";
+  }
+  auto const path = std::filesystem::path{timing_path};
+  auto filename = path.stem().string() + "_summary";
+  filename += path.extension().empty() ? ".csv" : path.extension().string();
+  return (path.parent_path() / filename).string();
+}
+}  // namespace
+
 namespace federated {
 grpc::Status FederatedService::Allgather(grpc::ServerContext*, AllgatherRequest const* request,
                                          AllgatherReply* reply) {
@@ -37,6 +69,7 @@ grpc::Status FederatedService::AllgatherV(grpc::ServerContext*, AllgatherVReques
 
 grpc::Status FederatedService::Allreduce(grpc::ServerContext*, AllreduceRequest const* request,
                                          AllreduceReply* reply) {
+  auto handler_start = std::chrono::steady_clock::now();
   double client_time_max = 0.0;
   double server_aggregation_time = 0.0;
   handler_.Allreduce(request->send_buffer().data(), request->send_buffer().size(),
@@ -44,8 +77,11 @@ grpc::Status FederatedService::Allreduce(grpc::ServerContext*, AllreduceRequest 
                      static_cast<xgboost::ArrayInterfaceHandler::Type>(request->data_type()),
                      static_cast<xgboost::collective::Op>(request->reduce_operation()),
                      request->client_total_time_s(), &client_time_max, &server_aggregation_time);
+  auto handler_end = std::chrono::steady_clock::now();
+  std::chrono::duration<double> handler_duration = handler_end - handler_start;
   reply->set_server_aggregation_time_s(server_aggregation_time);
   reply->set_client_time_max_s(client_time_max);
+  reply->set_server_handler_time_s(handler_duration.count());
   return grpc::Status::OK;
 }
 
@@ -56,8 +92,8 @@ grpc::Status FederatedService::ReportTiming(grpc::ServerContext*, ReportTimingRe
     rows.reserve(static_cast<std::size_t>(request->rows_size()));
     for (auto const& row : request->rows()) {
       rows.push_back(TimingRecord{row.iteration(), row.tree_id(), row.tree_node_id(),
-                                  row.rank(), row.compute_time_s(), row.server_time_s(),
-                                  row.communication_time_s()});
+                                  row.rank(), row.compute_time_s(), row.client_time_s(),
+                                  row.server_time_s(), row.communication_time_s()});
     }
     tracker_->AppendTimingRows(rows);
   }
@@ -91,6 +127,8 @@ FederatedTracker::FederatedTracker(Json const& config) : Tracker{config} {
       OptionalArg<Boolean, bool>(config, "federated_timing.enabled", default_timing_enabled);
   timing_path_ =
       OptionalArg<String, std::string>(config, "federated_timing.path", default_timing_path);
+  timing_path_ = ExpandUserPath(timing_path_);
+  timing_summary_path_ = MakeTimingSummaryPath(timing_path_);
 }
 
 std::future<Result> FederatedTracker::Run() {
@@ -102,15 +140,30 @@ std::future<Result> FederatedTracker::Run() {
 
     if (timing_enabled_ && !timing_path_.empty()) {
       std::lock_guard<std::mutex> lk(timing_mutex_);
+      EnsureTimingDirectory(timing_path_);
       timing_stream_.open(timing_path_, std::ios::out | std::ios::app);
       CHECK(timing_stream_.is_open()) << "Failed to open timing CSV: " << timing_path_;
+      timing_summary_stream_.open(timing_summary_path_, std::ios::out | std::ios::app);
+      CHECK(timing_summary_stream_.is_open())
+          << "Failed to open timing summary CSV: " << timing_summary_path_;
       if (std::filesystem::exists(timing_path_) && std::filesystem::file_size(timing_path_) > 0) {
         timing_header_written_ = true;
       }
+      if (std::filesystem::exists(timing_summary_path_) &&
+          std::filesystem::file_size(timing_summary_path_) > 0) {
+        timing_summary_header_written_ = true;
+      }
       if (!timing_header_written_) {
-        timing_stream_ << "iteration,tree_id,tree_node_id,rank,compute_time_s,server_time_s,communication_time_s\n";
+        timing_stream_ << "iteration,tree_id,tree_node_id,rank,compute_time_s,client_time_s,server_time_s,communication_time_s\n";
         timing_stream_.flush();
         timing_header_written_ = true;
+      }
+      if (!timing_summary_header_written_) {
+        timing_summary_stream_ << "iteration,tree_id,tree_node_id,max_compute_time_s,"
+                                  "max_client_time_s,server_time_s,"
+                                  "bottleneck_communication_time_s\n";
+        timing_summary_stream_.flush();
+        timing_summary_header_written_ = true;
       }
     }
 
@@ -178,17 +231,49 @@ void FederatedTracker::AppendTimingRows(std::vector<TimingRecord> const& rows) c
 
   std::lock_guard<std::mutex> lk(timing_mutex_);
   if (!timing_stream_.is_open()) {
+    EnsureTimingDirectory(timing_path_);
     timing_stream_.open(timing_path_, std::ios::out | std::ios::app);
     CHECK(timing_stream_.is_open()) << "Failed to open timing CSV: " << timing_path_;
   }
+  if (!timing_summary_stream_.is_open()) {
+    EnsureTimingDirectory(timing_summary_path_);
+    timing_summary_stream_.open(timing_summary_path_, std::ios::out | std::ios::app);
+    CHECK(timing_summary_stream_.is_open())
+        << "Failed to open timing summary CSV: " << timing_summary_path_;
+  }
 
   timing_stream_ << std::setprecision(17);
+  timing_summary_stream_ << std::setprecision(17);
   for (auto const& row : rows) {
     timing_stream_ << row.iteration << ',' << row.tree_id << ',' << row.tree_node_id << ','
-                   << row.rank << ',' << row.compute_time_s << ',' << row.server_time_s << ','
-                   << row.communication_time_s << '\n';
+                   << row.rank << ',' << row.compute_time_s << ',' << row.client_time_s << ','
+                   << row.server_time_s << ',' << row.communication_time_s << '\n';
+
+    TimingSummaryKey key{row.iteration, row.tree_id, row.tree_node_id};
+    auto& summary = timing_summary_[key];
+    if (summary.ranks.empty()) {
+      summary.max_compute_time_s = row.compute_time_s;
+      summary.max_client_time_s = row.client_time_s;
+      summary.server_time_s = row.server_time_s;
+      summary.bottleneck_communication_time_s = row.communication_time_s;
+    } else {
+      summary.max_compute_time_s = std::max(summary.max_compute_time_s, row.compute_time_s);
+      summary.max_client_time_s = std::max(summary.max_client_time_s, row.client_time_s);
+      summary.server_time_s = std::max(summary.server_time_s, row.server_time_s);
+      summary.bottleneck_communication_time_s =
+          std::min(summary.bottleneck_communication_time_s, row.communication_time_s);
+    }
+    summary.ranks.insert(row.rank);
+    if (summary.ranks.size() == static_cast<std::size_t>(this->n_workers_)) {
+      timing_summary_stream_ << key.iteration << ',' << key.tree_id << ',' << key.tree_node_id
+                             << ',' << summary.max_compute_time_s << ','
+                             << summary.max_client_time_s << ',' << summary.server_time_s << ','
+                             << summary.bottleneck_communication_time_s << '\n';
+      timing_summary_.erase(key);
+    }
   }
   timing_stream_.flush();
+  timing_summary_stream_.flush();
 }
 
 [[nodiscard]] Json FederatedTracker::WorkerArgs() const {

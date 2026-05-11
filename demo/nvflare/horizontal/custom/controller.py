@@ -17,7 +17,8 @@ import xgboost.federated
 class XGBoostController(Controller):
     def __init__(self, port: int, world_size: int, server_key_path: str,
                  server_cert_path: str, client_cert_path: str,
-                 timing_enabled: bool = False, timing_path: str = "federated_timing.csv"):
+                 timing_enabled: bool = False,
+                 timing_path: str = "~/FederatedLearning/nvflare-impl/results/federated_timing.csv"):
         """Controller for federated XGBoost.
 
         Args:

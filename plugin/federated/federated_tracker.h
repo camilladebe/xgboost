@@ -4,10 +4,13 @@
 #pragma once
 #include <federated.grpc.pb.h>  // for Server
 
+#include <cstdint>  // for int32_t, int64_t, uint64_t
 #include <future>  // for future
 #include <fstream>
+#include <map>
 #include <memory>  // for unique_ptr
 #include <mutex>
+#include <set>
 #include <string>  // for string
 #include <vector>
 
@@ -55,9 +58,38 @@ class FederatedTracker : public collective::Tracker {
   std::string client_cert_file_;
   bool timing_enabled_{false};
   std::string timing_path_;
+  std::string timing_summary_path_;
   mutable std::mutex timing_mutex_;
   mutable std::ofstream timing_stream_;
+  mutable std::ofstream timing_summary_stream_;
   mutable bool timing_header_written_{false};
+  mutable bool timing_summary_header_written_{false};
+
+  struct TimingSummaryKey {
+    std::uint64_t iteration{};
+    std::uint64_t tree_id{};
+    std::int64_t tree_node_id{};
+
+    [[nodiscard]] bool operator<(TimingSummaryKey const& other) const {
+      if (iteration != other.iteration) {
+        return iteration < other.iteration;
+      }
+      if (tree_id != other.tree_id) {
+        return tree_id < other.tree_id;
+      }
+      return tree_node_id < other.tree_node_id;
+    }
+  };
+
+  struct TimingSummaryState {
+    std::set<std::int32_t> ranks;
+    double max_compute_time_s{};
+    double max_client_time_s{};
+    double server_time_s{};
+    double bottleneck_communication_time_s{};
+  };
+
+  mutable std::map<TimingSummaryKey, TimingSummaryState> timing_summary_;
 
  public:
   /**

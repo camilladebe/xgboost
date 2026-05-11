@@ -18,6 +18,7 @@ struct TimingRecord {
   std::int64_t tree_node_id{};
   std::int32_t rank{};
   double compute_time_s{};
+  double client_time_s{};
   double server_time_s{};
   double communication_time_s{};
 };

@@ -2,6 +2,8 @@
  * Copyright 2023-2024, XGBoost contributors
  */
 #pragma once
+#include <chrono>  // for steady_clock
+
 #include "../../src/collective/coll.h"    // for Coll
 #include "../../src/collective/comm.h"    // for Comm
 
@@ -9,9 +11,12 @@ namespace xgboost::collective {
 class FederatedColl : public Coll {
  private:
   std::uint64_t sequence_number_{0};
-    double last_client_total_time_s_{0.0};
-    double last_server_aggregation_time_s_{0.0};
-    double last_communication_time_s_{0.0};
+  std::chrono::steady_clock::time_point last_allreduce_receive_time_{};
+  bool has_last_allreduce_receive_time_{false};
+  double last_client_time_s_{0.0};
+  double last_server_aggregation_time_s_{0.0};
+  double last_server_handler_time_s_{0.0};
+  double last_communication_time_s_{0.0};
 
  public:
   Coll *MakeCUDAVar() override;
@@ -25,12 +30,15 @@ class FederatedColl : public Coll {
                                   common::Span<std::int64_t const> sizes,
                                   common::Span<std::int64_t> recv_segments,
                                   common::Span<std::int8_t> recv, AllgatherVAlgo algo) override;
-    [[nodiscard]] Result ReportTiming(Comm const &comm, std::vector<TimingRecord> const &rows) override;
+  [[nodiscard]] Result ReportTiming(Comm const &comm,
+                                    std::vector<TimingRecord> const &rows) override;
 
-    [[nodiscard]] double LastClientTotalTimeS() const override { return last_client_total_time_s_; }
-    [[nodiscard]] double LastServerAggregationTimeS() const override {
-      return last_server_aggregation_time_s_;
-    }
-    [[nodiscard]] double LastCommunicationTimeS() const override { return last_communication_time_s_; }
+  [[nodiscard]] double LastClientTotalTimeS() const override { return last_client_time_s_; }
+  [[nodiscard]] double LastServerAggregationTimeS() const override {
+    return last_server_aggregation_time_s_;
+  }
+  [[nodiscard]] double LastCommunicationTimeS() const override {
+    return last_communication_time_s_;
+  }
 };
 }  // namespace xgboost::collective
